@@ -7,9 +7,9 @@ import numpy as np
 import cv2
 
 import torch
-import torchvision
 
-import pyiou
+from shapely.geometry import Polygon
+import shapely
 
 __all__ = [
     "filter_box",
@@ -34,66 +34,82 @@ def filter_box(output, scale_range):
     return output[keep]
 
 
-def non_max_suppression(detections, nms_thres=0.4, class_agnostic=False):
+def poly_ious(box1, box2):
+    nBox = box2.shape[0]
+    iou = torch.zeros(nBox)
+    polygon1 = Polygon(box1.reshape(4,2)).convex_hull
 
+    for i in range(0, nBox):
+        polygon2 = Polygon(box2[i,:].reshape(4,2)).convex_hull
+        if polygon1.intersects(polygon2):
+            try:
+                inter_area = polygon1.intersection(polygon2).area
+                union_area = polygon1.union(polygon2).area
+                iou[i] =  inter_area / union_area
+            except shapely.geos.TopologicalError:
+                print('shapely.geos.TopologicalError occured, iou set to 0')
+                iou[i] = 0
+
+    return iou
+
+
+def _nms(detections, nms_thres=0.4):
+    """ 非极大值抑制 """
+    detections_t = detections.cpu()
+    scores = detections_t[:, -4] * detections_t[:, -3]  # 计算目标的置信度
+
+    # 目标排序
+    _, conf_sort_index = torch.sort(scores, descending=True)
+    detections_t = detections_t[conf_sort_index]
+
+    # 提取目标的四顶点坐标
+    all_pts = []
+    for d in detections_t:
+        x, y, w, h = d[:4].numpy()
+        angle = d[-1].item()
+        if w < h:
+            h, w = w, h
+            angle += 90
+        rotate_box = ((x, y), (h, w), angle)
+        pts = cv2.boxPoints(rotate_box)
+        pt4 = [pts[0, 0], pts[0, 1], pts[1, 0], pts[1, 1], pts[2, 0], pts[2, 1], pts[3, 0], pts[3, 1]]
+        all_pts.append(pt4)
+    all_pts = np.array(all_pts)
+
+    # 非极大值抑制
+    max_detections = []
+    max_pts = []
+    while detections_t.shape[0]:
+        max_detections.append(detections_t[0])  # 最高置信度的bbox保存
+        max_pts.append(all_pts[0])
+        if len(detections_t) == 1:
+            break
+        ious = poly_ious(max_pts[-1], all_pts)  # 计算最高置信度bbox与其余bbox的iou
+        detections_t = detections_t[ious < nms_thres]  # 去除最高置信度bbox周围的bbox
+        all_pts = all_pts[ious < nms_thres]
+
+    # 转成张量
+    max_detections = [d.unsqueeze(0) for d in max_detections]
+    max_detections = torch.cat(max_detections, dim=0)
+
+    return max_detections
+
+
+def non_max_suppression(detections, nms_thres=0.4, class_agnostic=False):
+    """ non_max_suppression """
     # Detections ordered as (cx, cy, w, h, obj_conf, class_conf, class_pred, angle)
     detections = detections.cpu()
     if not class_agnostic:
-        # detections = torch.cat((pred[:, :9], class_prob.float().unsqueeze(1), class_pred.float().unsqueeze(1)), 1)
-        # Iterate through all predicted classes
         unique_labels = detections[:, 6].cpu().unique()
-
-        outputs = []
+        dets = []
         for c in unique_labels:
             detections_class = detections[detections[:, 6] == c]
-
-            all_pts = []
-            for d in detections_class:
-                x, y, w, h = d[:4].numpy()
-                angle = d[-1].item()
-                if w < h:
-                    h, w = w, h
-                    angle += 90
-                rotate_box = ((x, y), (h, w), angle)
-                # print('rotate_box: ', rotate_box)
-                pts = cv2.boxPoints(rotate_box)
-                pt4 = [pts[0, 0], pts[0, 1], pts[1, 0], pts[1, 1], pts[2, 0], pts[2, 1], pts[3, 0], pts[3, 1]]
-                all_pts.append(pt4)
-            all_pts = np.array(all_pts)
-
-            ious = pyiou.get_ious_4pts(all_pts.copy())
-
-            scores = detections_class[:, -4] * detections_class[:, -3]
-            # print('scores: ', scores)
-            keep = pyiou.fast_ious_process_4pts(ious, scores, nms_thres)
-            detections_class = detections_class[keep]
-            outputs.append(detections_class)
-
-        outputs = torch.cat(outputs)
-        return outputs
+            det_c = _nms(detections_class, nms_thres)
+            dets.append(det_c)
+        dets = torch.cat(dets, 0)
+        return dets
     else:
-        detections_class = detections
-
-        all_pts = []
-        for d in detections_class:
-            x, y, w, h = d[:4].numpy()
-            angle = d[-1].item()
-            if w < h:
-                h, w = w, h
-                angle += 90
-            rotate_box = ((x,y), (h,w), angle)
-            #print('rotate_box: ', rotate_box)
-            pts = cv2.boxPoints(rotate_box)
-            pt4 = [pts[0,0], pts[0,1], pts[1,0], pts[1,1], pts[2,0], pts[2,1], pts[3,0], pts[3,1]]
-            all_pts.append(pt4)
-        all_pts = np.array(all_pts)
-
-        ious = pyiou.get_ious_4pts(all_pts.copy())
-        scores = detections_class[:, -4] * detections_class[:, -3]
-        keep = pyiou.fast_ious_process_4pts(ious, scores, nms_thres)
-        detections_class = detections_class[keep]
-
-        return detections_class
+        return _nms(detections, nms_thres)
 
 
 def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45, class_agnostic=False):
@@ -122,8 +138,6 @@ def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45, class_agn
             output[i] = detections
         else:
             output[i] = torch.cat((output[i], detections))
-
-        #exit(0)
 
     return output
 
@@ -185,6 +199,7 @@ def xyxy2cxcywh(bboxes):
     bboxes[:, 0] = bboxes[:, 0] + bboxes[:, 2] * 0.5
     bboxes[:, 1] = bboxes[:, 1] + bboxes[:, 3] * 0.5
     return bboxes
+
 
 def order_points(pts):
     ''' sort rectangle points by clockwise '''
