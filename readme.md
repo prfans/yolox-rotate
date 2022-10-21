@@ -10,6 +10,5 @@
 ## 3. 推理测试
     python demo.py image
 
-## 参考资料及交流
+## 参考资料
     https://github.com/Megvii-BaseDetection/YOLOX
-    prfans@163.com
