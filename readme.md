@@ -1,6 +1,7 @@
 
+[![OSCS Status](https://www.oscs1024.com/platform/badge/prfans/yolox-rotate.svg?size=small)](https://www.oscs1024.com/project/prfans/yolox-rotate?ref=badge_small)
+
 # 基于yolox的旋转目标检测
-    [![OSCS Status](https://www.oscs1024.com/platform/badge/prfans/yolox-rotate.svg?size=small)](https://www.oscs1024.com/project/prfans/yolox-rotate?ref=badge_small)
     把角度量化到0-179度之间，把角度看作一个分类问题，对目标角度进行预测，角度损失函数使用二值交叉熵损失。
 
 ## 1. 数据准备及参数设置
